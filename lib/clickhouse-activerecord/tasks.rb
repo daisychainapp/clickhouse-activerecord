@@ -39,7 +39,7 @@ module ClickhouseActiverecord
 
       # get all tables
       tables = connection.execute("SHOW TABLES FROM #{@configuration.database} WHERE name NOT LIKE '.inner_id.%'")['data'].flatten.map do |table|
-        next if %w[schema_migrations ar_internal_metadata].include?(table)
+        # next if %w[schema_migrations ar_internal_metadata].include?(table)
         connection.show_create_table(table).gsub("#{@configuration.database}.", '')
       end.compact
 
