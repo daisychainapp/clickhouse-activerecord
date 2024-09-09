@@ -14,7 +14,7 @@ module ActiveRecord
 
         def exec_insert(sql, name, _binds, _pk = nil, _sequence_name = nil, returning: nil)
           new_sql = sql.dup.sub(/ (DEFAULT )?VALUES/, " VALUES")
-          do_execute(new_sql, name, format: nil, settings: {wait_for_async_insert: 0, sync_insert: 1})
+          do_execute(new_sql, name, format: nil, settings: {wait_for_async_insert: 0, async_insert: 1})
           true
         end
 
