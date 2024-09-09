@@ -35,7 +35,7 @@ module ActiveRecord
         end
 
         def exec_insert_all(sql, name)
-          do_execute(sql, name, format: nil, settings: {wait_for_async_insert: 0, sync_insert: 1})
+          do_execute(sql, name, format: nil, settings: {wait_for_async_insert: 0, async_insert: 1})
           true
         end
 
