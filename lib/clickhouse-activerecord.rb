@@ -11,6 +11,8 @@ require 'core_extensions/arel/nodes/select_statement'
 require 'core_extensions/arel/select_manager'
 require 'core_extensions/arel/table'
 
+require 'clickhouse-activerecord/settings'
+
 if defined?(Rails::Railtie)
   require 'clickhouse-activerecord/railtie'
   require 'clickhouse-activerecord/schema'
