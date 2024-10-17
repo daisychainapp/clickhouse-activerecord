@@ -111,7 +111,12 @@ module ActiveRecord
 
         def do_execute(sql, name = nil, format: DEFAULT_RESPONSE_FORMAT, settings: {})
           log(sql, "#{adapter_name} #{name}") do
-            res = request(sql, format, settings)
+            retries = 2
+            begin
+              res = request(sql, format, settings)
+            rescue EOFError
+              retry if (retries -= 1) > 0 # rubocop:disable Style/NumericPredicate
+            end
             process_response(res, format, sql)
           end
         end
