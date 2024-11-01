@@ -31,6 +31,11 @@ RSpec.describe 'Model', :migrations do
       end
     end
 
+    it 'DB::Exception in row value' do
+      Model.create!(event_name: 'DB::Exception')
+      expect(Model.first.event_name).to eq('DB::Exception')
+    end
+
     describe '#do_execute' do
       it 'returns formatted result' do
         result = Model.connection.do_execute('SELECT 1 AS t')
@@ -293,6 +298,49 @@ RSpec.describe 'Model', :migrations do
         expect(Model.final.where(date: '2023-07-21').to_sql).to eq('SELECT sample.* FROM sample FINAL WHERE sample.date = \'2023-07-21\'')
       end
     end
+
+    describe '#limit_by' do
+      it 'works' do
+        sql = Model.limit_by(1, :event_name).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample LIMIT 1 BY event_name')
+      end
+
+      it 'works with limit' do
+        sql = Model.limit(1).limit_by(1, :event_name).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample LIMIT 1 BY event_name LIMIT 1')
+      end
+    end
+
+    describe '#group_by_grouping_sets' do
+      it 'raises an error with no arguments' do
+        expect { Model.group_by_grouping_sets }.to raise_error(ArgumentError, 'The method .group_by_grouping_sets() must contain arguments.')
+      end
+
+      it 'works with the empty grouping set' do
+        sql = Model.group_by_grouping_sets([]).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample GROUP BY GROUPING SETS ( (  ) )')
+      end
+
+      it 'accepts strings' do
+        sql = Model.group_by_grouping_sets(%w[foo bar], %w[baz]).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample GROUP BY GROUPING SETS ( ( foo, bar ), ( baz ) )')
+      end
+
+      it 'accepts symbols' do
+        sql = Model.group_by_grouping_sets(%i[foo bar], %i[baz]).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample GROUP BY GROUPING SETS ( ( foo, bar ), ( baz ) )')
+      end
+
+      it 'accepts Arel nodes' do
+        sql = Model.group_by_grouping_sets([Model.arel_table[:foo], Model.arel_table[:bar]], [Model.arel_table[:baz]]).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample GROUP BY GROUPING SETS ( ( sample.foo, sample.bar ), ( sample.baz ) )')
+      end
+
+      it 'accepts mixed arguments' do
+        sql = Model.group_by_grouping_sets(['foo', :bar], [Model.arel_table[:baz]]).to_sql
+        expect(sql).to eq('SELECT sample.* FROM sample GROUP BY GROUPING SETS ( ( foo, bar ), ( sample.baz ) )')
+      end
+    end
   end
 
   context 'sample with id column' do
@@ -401,16 +449,29 @@ RSpec.describe 'Model', :migrations do
             map_datetime: {a: 1.day.ago, b: Time.now, c: '2022-12-06 15:22:49'},
             map_string: {a: 'asdf', b: 'jkl' },
             map_int: {a: 1, b: 2},
+            map_array_datetime: {a: [1.day.ago], b: [Time.now, '2022-12-06 15:22:49']},
+            map_array_string: {a: ['str'], b: ['str1', 'str2']},
+            map_array_int: {a: [1], b: [1, 2, 3]},
             date: date
           )
-        }.to change { model.count }
+        }.to change { model.count }.by(1)
+
         record = model.first
-        expect(record.map_datetime.is_a?(Hash)).to be_truthy
-        expect(record.map_datetime['a'].is_a?(DateTime)).to be_truthy
-        expect(record.map_string['a'].is_a?(String)).to be_truthy
+        expect(record.map_datetime).to be_a Hash
+        expect(record.map_string).to be_a Hash
+        expect(record.map_int).to be_a Hash
+        expect(record.map_array_datetime).to be_a Hash
+        expect(record.map_array_string).to be_a Hash
+        expect(record.map_array_int).to be_a Hash
+
+        expect(record.map_datetime['a']).to be_a DateTime
+        expect(record.map_string['a']).to be_a String
         expect(record.map_string).to eq({'a' => 'asdf', 'b' => 'jkl'})
-        expect(record.map_int.is_a?(Hash)).to be_truthy
         expect(record.map_int).to eq({'a' => 1, 'b' => 2})
+
+        expect(record.map_array_datetime['b']).to be_a Array
+        expect(record.map_array_string['b']).to be_a Array
+        expect(record.map_array_int['b']).to be_a Array
       end
 
       it 'create with insert all' do
@@ -419,21 +480,28 @@ RSpec.describe 'Model', :migrations do
             map_datetime: {a: 1.day.ago, b: Time.now, c: '2022-12-06 15:22:49'},
             map_string: {a: 'asdf', b: 'jkl' },
             map_int: {a: 1, b: 2},
+            map_array_datetime: {a: [1.day.ago], b: [Time.now, '2022-12-06 15:22:49']},
+            map_array_string: {a: ['str'], b: ['str1', 'str2']},
+            map_array_int: {a: [1], b: [1, 2, 3]},
             date: date
           }])
-        }.to change { model.count }
+        }.to change { model.count }.by(1)
       end
 
       it 'get record' do
-        model.connection.insert("INSERT INTO #{model.table_name} (id, map_datetime, date) VALUES (1, {'a': '2022-12-05 15:22:49', 'b': '2022-12-06 15:22:49'}, '2022-12-06')")
+        model.connection.insert("INSERT INTO #{model.table_name} (id, map_datetime, map_array_datetime, date) VALUES (1, {'a': '2022-12-05 15:22:49', 'b': '2024-01-01 12:00:08'}, {'c': ['2022-12-05 15:22:49','2024-01-01 12:00:08']}, '2022-12-06')")
         expect(model.count).to eq(1)
         record = model.first
         expect(record.date.is_a?(Date)).to be_truthy
         expect(record.date).to eq(Date.parse('2022-12-06'))
-        expect(record.map_datetime.is_a?(Hash)).to be_truthy
+        expect(record.map_datetime).to be_a Hash
         expect(record.map_datetime['a'].is_a?(DateTime)).to be_truthy
         expect(record.map_datetime['a']).to eq(DateTime.parse('2022-12-05 15:22:49'))
-        expect(record.map_datetime['b']).to eq(DateTime.parse('2022-12-06 15:22:49'))
+        expect(record.map_datetime['b']).to eq(DateTime.parse('2024-01-01 12:00:08'))
+        expect(record.map_array_datetime).to be_a Hash
+        expect(record.map_array_datetime['c']).to be_a Array
+        expect(record.map_array_datetime['c'][0]).to eq(DateTime.parse('2022-12-05 15:22:49'))
+        expect(record.map_array_datetime['c'][1]).to eq(DateTime.parse('2024-01-01 12:00:08'))
       end
     end
   end

@@ -47,6 +47,33 @@ module CoreExtensions
         self
       end
 
+      # GROUPING SETS allows you to specify multiple groupings in the GROUP BY clause.
+      # Whereas GROUP BY CUBE generates all possible groupings, GROUP BY GROUPING SETS generates only the specified groupings.
+      # For example:
+      #
+      #   users = User.group_by_grouping_sets([], [:name], [:name, :age]).select(:name, :age, 'count(*)')
+      #   # SELECT name, age, count(*) FROM users GROUP BY GROUPING SETS ( (), (name), (name, age) )
+      #
+      # which is generally equivalent to:
+      #   # SELECT NULL, NULL, count(*) FROM users
+      #   # UNION ALL
+      #   # SELECT name, NULL, count(*) FROM users GROUP BY name
+      #   # UNION ALL
+      #   # SELECT name, age, count(*) FROM users GROUP BY name, age
+      #
+      # Raises <tt>ArgumentError</tt> if no grouping sets are specified are provided.
+      def group_by_grouping_sets(*grouping_sets)
+        raise ArgumentError, 'The method .group_by_grouping_sets() must contain arguments.' if grouping_sets.blank?
+
+        spawn.group_by_grouping_sets!(*grouping_sets)
+      end
+
+      def group_by_grouping_sets!(*grouping_sets) # :nodoc:
+        grouping_sets = grouping_sets.map { |set| arel_columns(set) }
+        self.group_values += [::Arel::Nodes::GroupingSets.new(grouping_sets)]
+        self
+      end
+
       # The USING clause specifies one or more columns to join, which establishes the equality of these columns. For example:
       #
       #   users = User.joins(:joins).using(:event_name, :date)
@@ -81,6 +108,24 @@ module CoreExtensions
         self
       end
 
+      # The LIMIT BY clause permit to improve deduplication based on a unique key, it has better performances than
+      # the GROUP BY clause
+      #
+      #   users = User.limit_by(1, id)
+      #   # SELECT users.* FROM users LIMIT 1 BY id
+      #
+      # An <tt>ActiveRecord::ActiveRecordError</tt> will be reaised if database is not Clickhouse.
+      # @param [Array] opts
+      def limit_by(*opts)
+        spawn.limit_by!(*opts)
+      end
+
+      # @param [Array] opts
+      def limit_by!(*opts)
+        @values[:limit_by] = *opts
+        self
+      end
+
       private
 
       def check_command(cmd)
@@ -95,6 +140,7 @@ module CoreExtensions
         end
 
         arel.final! if @values[:final].present?
+        arel.limit_by(*@values[:limit_by]) if @values[:limit_by].present?
         arel.settings(@values[:settings]) if @values[:settings].present?
         arel.using(@values[:using]) if @values[:using].present?
         arel.windows(@values[:windows]) if @values[:windows].present?

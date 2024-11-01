@@ -35,7 +35,7 @@ module ClickhouseActiverecord
           # super(table.gsub(/^\.inner\./, ''), stream)
 
           # detect view table
-          match = sql.match(/^CREATE\s+(MATERIALIZED\s+)?VIEW/)
+          view_match = sql.match(/^CREATE\s+(MATERIALIZED\s+)?VIEW\s+\S+\s+(?:TO (\S+))?/)
         end
 
         # Copy from original dumper
@@ -50,8 +50,9 @@ module ClickhouseActiverecord
 
           unless simple
             # Add materialize flag
-            tbl.print ', view: true' if match
-            tbl.print ', materialized: true' if match && match[1].presence
+            tbl.print ', view: true' if view_match
+            tbl.print ', materialized: true' if view_match && view_match[1].presence
+            tbl.print ", to: \"#{view_match[2]}\"" if view_match && view_match[2].presence
           end
 
           if (id = columns.detect { |c| c.name == 'id' })
@@ -75,10 +76,10 @@ module ClickhouseActiverecord
           tbl.puts ", force: :cascade do |t|"
 
           # then dump all non-primary key columns
-          if simple || !match
+          if simple || !view_match
             columns.each do |column|
               raise StandardError, "Unknown type '#{column.sql_type}' for column '#{column.name}'" unless @connection.valid_type?(column.type)
-              next if column.name == pk
+              next if column.name == pk && column.name == "id"
               type, colspec = column_spec(column)
               name = column.name =~ (/\./) ? "\"`#{column.name}`\"" : column.name.inspect
               tbl.print "    t.#{type} #{name}"
@@ -111,8 +112,11 @@ module ClickhouseActiverecord
     def function(function, stream)
       stream.puts "  # FUNCTION: #{function}"
       sql = @connection.show_create_function(function)
-      stream.puts "  # SQL: #{sql}" if sql
-      stream.puts "  create_function \"#{function}\", \"#{sql.gsub(/^CREATE FUNCTION (.*?) AS/, '').strip}\"" if sql
+      if sql
+        stream.puts "  # SQL: #{sql}"
+        stream.puts "  create_function \"#{function}\", \"#{sql.gsub(/^CREATE FUNCTION (.*?) AS/, '').strip}\", force: true"
+        stream.puts
+      end
     end
 
     def format_options(options)
@@ -141,23 +145,32 @@ module ClickhouseActiverecord
     end
 
     def schema_array(column)
-      (column.sql_type =~ /Array?\(/).nil? ? nil : true
+      (column.sql_type =~ /Array\(/).nil? ? nil : true
     end
 
     def schema_map(column)
-      (column.sql_type =~ /Map?\(/).nil? ? nil : true
+      if column.sql_type =~ /Map\(([^,]+),\s*(Array)\)/
+        return :array
+      end
+
+      (column.sql_type =~ /Map\(/).nil? ? nil : true
     end
 
     def schema_low_cardinality(column)
-      (column.sql_type =~ /LowCardinality?\(/).nil? ? nil : true
+      (column.sql_type =~ /LowCardinality\(/).nil? ? nil : true
     end
 
+    # @param [ActiveRecord::ConnectionAdapters::Clickhouse::Column] column
     def prepare_column_options(column)
       spec = {}
       spec[:unsigned] = schema_unsigned(column)
       spec[:array] = schema_array(column)
       spec[:map] = schema_map(column)
+      if spec[:map] == :array
+        spec[:array] = nil
+      end
       spec[:low_cardinality] = schema_low_cardinality(column)
+      spec[:codec] = column.codec.inspect if column.codec
       spec.merge(super).compact
     end
 

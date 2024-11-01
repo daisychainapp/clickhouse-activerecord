@@ -2,18 +2,21 @@
 
 require 'arel/visitors/clickhouse'
 require 'arel/nodes/final'
+require 'arel/nodes/grouping_sets'
 require 'arel/nodes/settings'
 require 'arel/nodes/using'
+require 'arel/nodes/limit_by'
 require 'active_record/connection_adapters/clickhouse/oid/array'
 require 'active_record/connection_adapters/clickhouse/oid/date'
 require 'active_record/connection_adapters/clickhouse/oid/date_time'
 require 'active_record/connection_adapters/clickhouse/oid/big_integer'
 require 'active_record/connection_adapters/clickhouse/oid/map'
 require 'active_record/connection_adapters/clickhouse/oid/uuid'
+require 'active_record/connection_adapters/clickhouse/column'
 require 'active_record/connection_adapters/clickhouse/quoting'
-require 'active_record/connection_adapters/clickhouse/schema_definitions'
 require 'active_record/connection_adapters/clickhouse/schema_creation'
 require 'active_record/connection_adapters/clickhouse/schema_statements'
+require 'active_record/connection_adapters/clickhouse/table_definition'
 require 'net/http'
 require 'openssl'
 
@@ -47,7 +50,12 @@ module ActiveRecord
 
   module ModelSchema
     module ClassMethods
-      delegate :final, :final!, :settings, :settings!, :window, :window!, to: :all
+      delegate :final, :final!,
+               :group_by_grouping_sets, :group_by_grouping_sets!,
+               :settings, :settings!,
+               :window, :window!,
+               :limit_by, :limit_by!,
+               to: :all
 
       def is_view
         @is_view || false
@@ -68,13 +76,6 @@ module ActiveRecord
 
     if ActiveRecord::version >= Gem::Version.new('7.2')
       register "clickhouse", "ActiveRecord::ConnectionAdapters::ClickhouseAdapter", "active_record/connection_adapters/clickhouse_adapter"
-    end
-
-    class ClickhouseColumn < Column
-      private
-      def deduplicated
-        self
-      end
     end
 
     class ClickhouseAdapter < AbstractAdapter
@@ -351,8 +352,8 @@ module ActiveRecord
         end
       end
 
-      def create_function(name, body)
-        fd = "CREATE FUNCTION #{apply_cluster(quote_table_name(name))} AS #{body}"
+      def create_function(name, body, **options)
+        fd = "CREATE#{' OR REPLACE' if options[:force]} FUNCTION #{apply_cluster(quote_table_name(name))} AS #{body}"
         do_execute(fd, format: nil)
       end
 
