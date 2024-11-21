@@ -15,13 +15,16 @@ module ClickhouseActiverecord
     private
 
     def tables(stream)
-      functions = @connection.functions
+      functions = @connection.functions.sort
       functions.each do |function|
         function(function, stream)
       end
 
-      sorted_tables = @connection.tables.sort {|a,b| @connection.show_create_table(a).match(/^CREATE\s+(MATERIALIZED\s+)?VIEW/) ? 1 : a <=> b }
-      sorted_tables.each do |table_name|
+      view_tables = @connection.views.sort
+      materialized_view_tables = @connection.materialized_views.sort
+      sorted_tables = @connection.tables.sort - view_tables - materialized_view_tables
+
+      (sorted_tables + view_tables + materialized_view_tables).each do |table_name|
         table(table_name, stream) unless ignored?(table_name)
       end
     end
@@ -107,6 +110,15 @@ module ClickhouseActiverecord
           stream.puts
         end
       end
+    end
+
+    def column_spec_for_primary_key(column)
+      spec = super
+
+      id = ActiveRecord::ConnectionAdapters::ClickhouseAdapter::NATIVE_DATABASE_TYPES.invert[{name: column.sql_type.gsub(/\(\d+\)/, "")}]
+      spec[:id] = id.inspect if id.present?
+
+      spec.except!(:limit, :unsigned) # This can be removed at some date, it is only here to clean up existing schemas which have dumped these values already
     end
 
     def function(function, stream)

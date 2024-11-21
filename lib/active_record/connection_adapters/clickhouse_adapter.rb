@@ -191,6 +191,8 @@ module ActiveRecord
               nil
             when /(Nullable)?\(?U?Int64\)?/
               8
+            when /(Nullable)?\(?U?Int128\)?/
+              16
             else
               super
           end
@@ -312,7 +314,7 @@ module ActiveRecord
         end
       end
 
-      def create_view(table_name, **options)
+      def create_view(table_name, request_settings: {}, **options)
         options.merge!(view: true)
         options = apply_replica(table_name, options)
         td = create_table_definition(apply_cluster(table_name), **options)
@@ -322,10 +324,10 @@ module ActiveRecord
           drop_table(table_name, options.merge(if_exists: true))
         end
 
-        do_execute(schema_creation.accept(td), format: nil)
+        do_execute(schema_creation.accept(td), format: nil, settings: request_settings)
       end
 
-      def create_table(table_name, **options, &block)
+      def create_table(table_name, request_settings: {}, **options, &block)
         options = apply_replica(table_name, options)
         td = create_table_definition(apply_cluster(table_name), **options)
         block.call td if block_given?
@@ -339,7 +341,7 @@ module ActiveRecord
           drop_table(table_name, options.merge(if_exists: true))
         end
 
-        do_execute(schema_creation.accept(td), format: nil)
+        do_execute(schema_creation.accept(td), format: nil, settings: request_settings)
 
         if options[:with_distributed]
           distributed_table_name = options.delete(:with_distributed)
