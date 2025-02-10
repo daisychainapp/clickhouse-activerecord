@@ -122,7 +122,7 @@ module ActiveRecord
             retries = 2
             begin
               res = request(sql, format, settings)
-            rescue EOFError
+            rescue EOFError, Errno::ECONNRESET
               retry if (retries -= 1) > 0 # rubocop:disable Style/NumericPredicate
             end
             process_response(res, format, sql)
