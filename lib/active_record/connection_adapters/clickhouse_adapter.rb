@@ -305,9 +305,11 @@ module ActiveRecord
       end
 
       # @param [String] table
+      # @option [Boolean] single_line
       # @return [String]
-      def show_create_table(table)
-        do_system_execute("SHOW CREATE TABLE `#{table}`")['data'].try(:first).try(:first).gsub(/[\n\s]+/m, ' ').gsub("#{@config[:database]}.", "")
+      def show_create_table(table, single_line: true)
+        sql = do_system_execute("SHOW CREATE TABLE `#{table}`")['data'].try(:first).try(:first).gsub("#{@config[:database]}.", '')
+        single_line ? sql.squish : sql
       end
 
       # Create a new ClickHouse database.
@@ -482,6 +484,13 @@ module ActiveRecord
         @config[:database]
       end
 
+      # Returns the shard name from the configuration.
+      # This is used to identify the shard in replication paths when using both sharding and replication.
+      # Required when you have multiple shards with replication to ensure unique paths for each shard's replication metadata.
+      def shard
+        @config[:shard_name]
+      end
+
       def use_default_replicated_merge_tree_params?
         database_engine_atomic? && @config[:use_default_replicated_merge_tree_params]
       end
@@ -490,8 +499,17 @@ module ActiveRecord
         (replica || use_default_replicated_merge_tree_params?) && cluster
       end
 
+      # Returns the path for replication metadata.
+      # When sharding is enabled (shard_name is set), the path includes the shard identifier
+      # to ensure unique paths for each shard's replication metadata.
+      # Format with sharding: /clickhouse/tables/{cluster}/{shard}/{database}.{table}
+      # Format without sharding: /clickhouse/tables/{cluster}/{database}.{table}
       def replica_path(table)
-        "/clickhouse/tables/#{cluster}/#{@connection_config[:database]}.#{table}"
+        if shard
+          "/clickhouse/tables/#{cluster}/#{shard}/#{@connection_config[:database]}.#{table}"
+        else
+          "/clickhouse/tables/#{cluster}/#{@connection_config[:database]}.#{table}"
+        end
       end
 
       def database_engine_atomic?
