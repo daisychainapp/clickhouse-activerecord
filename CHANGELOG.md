@@ -1,3 +1,21 @@
+### Version 1.5.1 (Nov 6, 2025)
+
+* Fix rake tasks
+
+### Version 1.5.0 (Nov 5, 2025)
+
+* 🎉 Support for Rails 8.1
+* Fix sql structure dump with `schema_migrations` #138
+* Remove old tasks
+
+### Version 1.4.0 (Sep 18, 2025)
+
+* `CREATE OR REPLACE FUNCTION` in SQL schema dumps in #198
+* Added shard config to handle replica path with shard in #201
+* Add support for simple schema dumping in #203
+* Unscope :final and :settings in #208
+* Encapsulate format logic within Statement and helper classes in #162
+
 ### Version 1.3.1 (Feb 12, 2025)
 
  * Restore replace database from dump schema table creation
