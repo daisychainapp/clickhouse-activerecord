@@ -265,7 +265,7 @@ module ActiveRecord
           retries = 2
           begin
             statement.response = request(statement, settings: settings, except_params: except_params)
-          rescue EOFError, Errno::ECONNRESET
+          rescue EOFError, Errno::ECONNRESET, OpenSSL::SSL::SSLError
             retry if (retries -= 1) > 0 # rubocop:disable Style/NumericPredicate
           end
           statement.processed_response
