@@ -27,7 +27,7 @@ module ActiveRecord
         end
 
         # @param [Net::HTTPResponse] response
-        # @return [String, nil]
+        # @return [Tempfile]
         def streaming_response(response)
           ResponseProcessor.new(response, @format, @sql).streaming_process
         end

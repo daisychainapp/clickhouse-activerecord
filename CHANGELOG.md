@@ -1,6 +1,7 @@
-### Version 1.6.5 (Feb 16, 2026)
+### Version 1.6.6 (Feb 16, 2026)
 
 * Fix error: EOFError (end of file reached)
+* Method `execute_to_file` will return `Tempfile` object
 
 ### Version 1.6.3 (Feb 04, 2026)
 

@@ -54,7 +54,7 @@ module ActiveRecord
         end
 
         # Execute an SQL query and save the result to a file in stream mode
-        # @return [String]
+        # @return [Tempfile]
         def execute_to_file(sql, name = nil, format: @response_format, settings: {})
           with_response_format(format) do
             log(sql, [adapter_name, 'Stream', name].compact.join(' ')) do

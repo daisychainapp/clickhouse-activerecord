@@ -29,15 +29,15 @@ module ActiveRecord
             @body
           end
 
-          # @return [String, nil]
+          # @return [Tempfile]
           def streaming_process
             file = Tempfile.new('clickhouse-activerecord', binmode: true)
             if success?
               @raw_response.read_body do |chunk|
                 file.write(chunk)
               end
-              file.close
-              file.path
+              file.rewind
+              file
             else
               @body = @raw_response.body
               raise_database_error!

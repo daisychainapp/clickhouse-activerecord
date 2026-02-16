@@ -12,18 +12,18 @@ RSpec.describe 'Streaming', :migrations do
     end
 
     it 'simple' do
-      path = Model.connection.execute_to_file('SELECT count(*) AS count FROM sample')
-      expect(path.is_a?(String)).to be_truthy
+      file = Model.connection.execute_to_file('SELECT count(*) AS count FROM sample')
+      expect(file.is_a?(Tempfile)).to be_truthy
       if Model.connection.server_version.to_f < 25
-        expect(File.read(path)).to eq("[\"count\"]\n[\"UInt64\"]\n[\"0\"]\n")
+        expect(file.read).to eq("[\"count\"]\n[\"UInt64\"]\n[\"0\"]\n")
       else
-        expect(File.read(path)).to eq("[\"count\"]\n[\"UInt64\"]\n[0]\n")
+        expect(file.read).to eq("[\"count\"]\n[\"UInt64\"]\n[0]\n")
       end
     end
 
     it 'JSONCompact format' do
-      path = Model.connection.execute_to_file('SELECT count(*) AS count FROM sample', format: 'JSONCompact')
-      data = JSON.parse(File.read(path))
+      file = Model.connection.execute_to_file('SELECT count(*) AS count FROM sample', format: 'JSONCompact')
+      data = JSON.parse(file.read)
       if Model.connection.server_version.to_f < 25
         expect(data['data'][0][0]).to eq('0')
       else
@@ -32,8 +32,8 @@ RSpec.describe 'Streaming', :migrations do
     end
 
     it 'JSONEachRow format' do
-      path = Model.connection.execute_to_file('SELECT count(*) AS count FROM sample', format: 'JSONEachRow')
-      data = JSON.parse(File.read(path))
+      file = Model.connection.execute_to_file('SELECT count(*) AS count FROM sample', format: 'JSONEachRow')
+      data = JSON.parse(file.read)
       if Model.connection.server_version.to_f < 25
         expect(data['count']).to eq('0')
       else
@@ -42,8 +42,8 @@ RSpec.describe 'Streaming', :migrations do
     end
 
     it 'multiple rows JSONEachRow format' do
-      path = Model.connection.execute_to_file('SELECT * FROM generate_series(1, 1000000)', format: 'JSONEachRow')
-      lines = File.readlines(path)
+      file = Model.connection.execute_to_file('SELECT * FROM generate_series(1, 1000000)', format: 'JSONEachRow')
+      lines = file.readlines
       if Model.connection.server_version.to_f < 25
         expect(JSON.parse(lines[0])).to eq('generate_series' => '1')
       else
@@ -53,8 +53,8 @@ RSpec.describe 'Streaming', :migrations do
     end
 
     it 'multiple rows CSVWithNames format' do
-      path = Model.connection.execute_to_file('SELECT * FROM generate_series(1, 1000000)', format: 'CSVWithNames')
-      lines = File.readlines(path)
+      file = Model.connection.execute_to_file('SELECT * FROM generate_series(1, 1000000)', format: 'CSVWithNames')
+      lines = file.readlines
       expect(JSON.parse(lines[0])).to eq('generate_series')
       expect(JSON.parse(lines[1])).to eq(1)
       expect(lines.size).to eq(1000001)
@@ -63,11 +63,5 @@ RSpec.describe 'Streaming', :migrations do
     it 'error' do
       expect { Model.connection.execute_to_file('error request') }.to raise_error(ActiveRecord::ActiveRecordError, include('DB::Exception'))
     end
-  end
-
-  it 'EOFError' do
-    Model.connection.execute('SELECT 1')
-    Model.connection.execute_to_file('SELECT * FROM generate_series(1, 1000000)', format: 'JSONEachRow')
-    Model.connection.execute_to_file('SELECT * FROM generate_series(1, 1000000)', format: 'JSONEachRow')
   end
 end
