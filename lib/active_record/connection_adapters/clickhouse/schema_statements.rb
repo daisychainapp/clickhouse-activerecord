@@ -58,7 +58,19 @@ module ActiveRecord
         def execute_to_file(sql, name = nil, format: @response_format, settings: {})
           with_response_format(format) do
             log(sql, [adapter_name, 'Stream', name].compact.join(' ')) do
-              request(sql, settings: settings, streaming: true)
+              statement = Statement.new(sql, format: @response_format)
+              result = nil
+              @lock.synchronize do
+                req = Net::HTTP::Post.new("/?#{settings_params(settings)}", {
+                  'Content-Type' => 'application/x-www-form-urlencoded',
+                  'User-Agent' => ClickhouseAdapter::USER_AGENT,
+                })
+                @connection.start unless @connection.started?
+                @connection.request(req, statement.formatted_sql) do |response|
+                  result = statement.streaming_response(response)
+                end
+              end
+              result
             end
           end
         end
@@ -99,7 +111,8 @@ module ActiveRecord
         # @link https://clickhouse.com/docs/en/sql-reference/statements/delete
         def exec_delete(sql, name = nil, _binds = [])
           log(sql, "#{adapter_name} #{name}") do
-            res = request(sql, raw_response: true)
+            statement = Statement.new(sql, format: @response_format)
+            res = request(statement)
             begin
               data = JSON.parse(res.header['x-clickhouse-summary'])
               data['result_rows'].to_i
@@ -276,30 +289,22 @@ module ActiveRecord
         end
 
         def raw_execute(sql, settings: {}, except_params: [])
-          request(sql, settings: settings, except_params: except_params)
+          statement = Statement.new(sql, format: @response_format)
+          response = request(statement, settings: settings, except_params: except_params)
+          statement.processed_response(response)
         end
 
         # Make HTTP request to ClickHouse server
-        # @param [String] sql
+        # @param [ActiveRecord::ConnectionAdapters::Clickhouse::Statement] statement
         # @param [Hash] settings
         # @param [Array] except_params
         # @return [Net::HTTPResponse]
-        def request(sql, settings: {}, except_params: [], raw_response: false, streaming: false)
+        def request(statement, settings: {}, except_params: [])
           @lock.synchronize do
-            req = Net::HTTP::Post.new("/?#{settings_params(settings, except: except_params)}", {
-              'Content-Type' => 'application/x-www-form-urlencoded',
-              'User-Agent' => ClickhouseAdapter::USER_AGENT,
-            })
-            statement = Statement.new(sql, format: @response_format)
-            if streaming
-              @connection.request(req, statement.formatted_sql) do |response|
-                return statement.streaming_response(response)
-              end
-            else
-              response = @connection.request(req, statement.formatted_sql)
-              return response if raw_response
-              statement.processed_response(response)
-            end
+            @connection.post("/?#{settings_params(settings, except: except_params)}",
+                             statement.formatted_sql,
+                             'Content-Type' => 'application/x-www-form-urlencoded',
+                             'User-Agent' => ClickhouseAdapter::USER_AGENT)
           end
         end
 

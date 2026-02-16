@@ -64,4 +64,10 @@ RSpec.describe 'Streaming', :migrations do
       expect { Model.connection.execute_to_file('error request') }.to raise_error(ActiveRecord::ActiveRecordError, include('DB::Exception'))
     end
   end
+
+  it 'EOFError' do
+    Model.connection.execute('SELECT 1')
+    Model.connection.execute_to_file('SELECT * FROM generate_series(1, 1000000)', format: 'JSONEachRow')
+    Model.connection.execute_to_file('SELECT * FROM generate_series(1, 1000000)', format: 'JSONEachRow')
+  end
 end

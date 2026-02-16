@@ -1,4 +1,4 @@
-### Version 1.6.4 (Feb 13, 2026)
+### Version 1.6.5 (Feb 16, 2026)
 
 * Fix error: EOFError (end of file reached)
 
