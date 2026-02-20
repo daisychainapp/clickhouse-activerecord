@@ -82,7 +82,7 @@ module ActiveRecord
         end
 
         def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false, allow_retry: false)
-          result = execute(sql, name)
+          result = execute(sql, name, format: @response_format || DEFAULT_RESPONSE_FORMAT)
           unless result.is_a?(Hash) && result.key?('meta')
             raise ActiveRecord::ActiveRecordError,
               "Unexpected ClickHouse response: class=#{result.class} " \
