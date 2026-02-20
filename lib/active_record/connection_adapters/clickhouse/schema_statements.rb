@@ -83,6 +83,13 @@ module ActiveRecord
 
         def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false, allow_retry: false)
           result = execute(sql, name)
+          unless result.is_a?(Hash) && result.key?('meta')
+            raise ActiveRecord::ActiveRecordError,
+              "Unexpected ClickHouse response: class=#{result.class} " \
+              "inspect=#{result.inspect.truncate(500)} " \
+              "sql=#{sql.truncate(200)} " \
+              "format=#{@response_format.inspect}"
+          end
           columns = result['meta'].map { |m| m['name'] }
           types = {}
           result['meta'].each_with_index do |m, i|
