@@ -17,6 +17,28 @@ RSpec.describe 'ActiveRecord::ConnectionAdapters::Clickhouse::SchemaStatements' 
     end
   end
 
+  describe '#tables' do
+    before do
+      connection.execute('CREATE TABLE tables_format_test (id UInt64) ENGINE = MergeTree ORDER BY id')
+    end
+
+    after do
+      connection.execute('DROP TABLE IF EXISTS tables_format_test')
+    end
+
+    it 'returns tables even when response format is scoped to nil' do
+      result = nil
+
+      expect do
+        connection.with_response_format(nil) do
+          result = connection.tables
+        end
+      end.not_to raise_error
+
+      expect(result).to include('tables_format_test')
+    end
+  end
+
   describe '#truncate_tables' do
     before do
       connection.execute('CREATE TABLE truncate_test (id UInt64, name String) ENGINE = MergeTree ORDER BY id')

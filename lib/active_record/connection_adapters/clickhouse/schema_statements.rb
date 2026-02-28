@@ -184,7 +184,7 @@ module ActiveRecord
 
         def do_system_execute(sql, name = nil, except_params: [])
           log_with_debug(sql, [adapter_name, name].compact.join(' ')) do
-            raw_execute(sql, except_params: except_params)
+            raw_execute(sql, except_params: except_params, format: ClickhouseAdapter::DEFAULT_RESPONSE_FORMAT)
           end
         end
 
@@ -295,8 +295,8 @@ module ActiveRecord
           (%r{\w+\(.*\)} === default)
         end
 
-        def raw_execute(sql, settings: {}, except_params: [])
-          statement = Statement.new(sql, format: @response_format)
+        def raw_execute(sql, settings: {}, except_params: [], format: @response_format)
+          statement = Statement.new(sql, format: format)
           retries = 2
           begin
             response = request(statement, settings: settings, except_params: except_params)
