@@ -3,6 +3,20 @@
 RSpec.describe 'ActiveRecord::ConnectionAdapters::Clickhouse::SchemaStatements' do
   let(:connection) { ActiveRecord::Base.connection }
 
+  describe '#internal_exec_query' do
+    it 'uses adapter default response format when scoped format is nil' do
+      result = nil
+
+      expect do
+        connection.with_response_format(nil) do
+          result = connection.select_all('SELECT 1 AS one')
+        end
+      end.not_to raise_error
+
+      expect(result.to_a).to eq([{ 'one' => 1 }])
+    end
+  end
+
   describe '#truncate_tables' do
     before do
       connection.execute('CREATE TABLE truncate_test (id UInt64, name String) ENGINE = MergeTree ORDER BY id')

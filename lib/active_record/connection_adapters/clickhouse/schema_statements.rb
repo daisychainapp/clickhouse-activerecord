@@ -82,7 +82,7 @@ module ActiveRecord
         end
 
         def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false, allow_retry: false)
-          result = execute(sql, name, format: @response_format || DEFAULT_RESPONSE_FORMAT)
+          result = execute(sql, name, format: @response_format || ClickhouseAdapter::DEFAULT_RESPONSE_FORMAT)
           unless result.is_a?(Hash) && result.key?('meta')
             raise ActiveRecord::ActiveRecordError,
               "Unexpected ClickHouse response: class=#{result.class} " \
@@ -188,7 +188,7 @@ module ActiveRecord
           end
         end
 
-        def do_execute(sql, name = nil, format: DEFAULT_RESPONSE_FORMAT, settings: {})
+        def do_execute(sql, name = nil, format: ClickhouseAdapter::DEFAULT_RESPONSE_FORMAT, settings: {})
           ActiveRecord.deprecator.warn(<<~MSG.squish)
             `do_execute` is deprecated and will be removed in an upcoming release.
             Please use `execute` instead.
