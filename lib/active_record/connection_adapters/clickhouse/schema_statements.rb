@@ -1,11 +1,16 @@
 # frozen_string_literal: true
 
+require 'base64'
 require 'clickhouse-activerecord/version'
 
 module ActiveRecord
   module ConnectionAdapters
     module Clickhouse
       module SchemaStatements
+        HTTP_AUTH_QUERY_PARAMS = :query_params
+        HTTP_AUTH_BASIC = :basic
+        HTTP_AUTH_X_HEADERS = :x_clickhouse_headers
+        HTTP_AUTH_TYPES = [HTTP_AUTH_QUERY_PARAMS, HTTP_AUTH_BASIC, HTTP_AUTH_X_HEADERS].freeze
 
         def with_settings(**settings)
           @block_settings ||= {}
@@ -32,14 +37,14 @@ module ActiveRecord
         #   end
         #   # sends and executes "SELECT * FROM table"
         def with_response_format(format)
-          prev_format = @response_format
-          @response_format = format
+          stack = response_format_stack
+          stack.push(format)
           yield
         ensure
-          @response_format = prev_format
+          stack.pop
         end
 
-        def execute(sql, name = nil, format: @response_format, settings: {})
+        def execute(sql, name = nil, format: response_format, settings: {})
           with_response_format(format) do
             log(sql, [adapter_name, name].compact.join(' ')) do
               raw_execute(sql, settings: settings)
@@ -55,16 +60,13 @@ module ActiveRecord
 
         # Execute an SQL query and save the result to a file in stream mode
         # @return [Tempfile]
-        def execute_to_file(sql, name = nil, format: @response_format, settings: {})
+        def execute_to_file(sql, name = nil, format: response_format, settings: {})
           with_response_format(format) do
             log(sql, [adapter_name, 'Stream', name].compact.join(' ')) do
-              statement = Statement.new(sql, format: @response_format)
+              statement = Statement.new(sql, format: response_format)
               result = nil
               @lock.synchronize do
-                req = Net::HTTP::Post.new("/?#{settings_params(settings)}", {
-                  'Content-Type' => 'application/x-www-form-urlencoded',
-                  'User-Agent' => ClickhouseAdapter::USER_AGENT,
-                })
+                req = Net::HTTP::Post.new("/?#{settings_params(settings)}", build_request_headers)
                 @connection.start unless @connection.started?
                 @connection.request(req, statement.formatted_sql) do |response|
                   result = statement.streaming_response(response)
@@ -82,13 +84,13 @@ module ActiveRecord
         end
 
         def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false, allow_retry: false)
-          result = execute(sql, name, format: @response_format || ClickhouseAdapter::DEFAULT_RESPONSE_FORMAT)
+          result = execute(sql, name, format: response_format || ClickhouseAdapter::DEFAULT_RESPONSE_FORMAT)
           unless result.is_a?(Hash) && result.key?('meta')
             raise ActiveRecord::ActiveRecordError,
               "Unexpected ClickHouse response: class=#{result.class} " \
               "inspect=#{result.inspect.truncate(500)} " \
               "sql=#{sql.truncate(200)} " \
-              "format=#{@response_format.inspect}"
+              "format=#{response_format.inspect}"
           end
           columns = result['meta'].map { |m| m['name'] }
           types = {}
@@ -118,7 +120,7 @@ module ActiveRecord
         # @link https://clickhouse.com/docs/en/sql-reference/statements/delete
         def exec_delete(sql, name = nil, _binds = [])
           log(sql, "#{adapter_name} #{name}") do
-            statement = Statement.new(sql, format: @response_format)
+            statement = Statement.new(sql, format: response_format)
             res = request(statement)
             begin
               data = JSON.parse(res.header['x-clickhouse-summary'])
@@ -246,11 +248,23 @@ module ActiveRecord
           result = do_system_execute("DESCRIBE TABLE `#{table_name}`", table_name)
           data = result['data']
 
-          return data unless data.empty?
+          raise ActiveRecord::StatementInvalid, "Could not find table '#{table_name}'" if data.empty?
 
-          raise ActiveRecord::StatementInvalid, "Could not find table '#{table_name}'"
+          data.map do |row|
+            Clickhouse::DescribedColumn.new(
+              name: row[0],
+              sql_type: row[1],
+              default_type: row[2],
+              default_expression: row[3],
+              comment: row[4],
+              codec: row[5],
+            )
+          end
         end
-        alias column_definitions table_structure
+
+        def column_definitions(table_name)
+          table_structure(table_name).reject(&:ephemeral?)
+        end
 
         private
 
@@ -263,18 +277,17 @@ module ActiveRecord
         end
 
         def new_column_from_field(table_name, field, _definitions)
-          column_name, sql_type, default_type, default_expression = field
-          type_metadata = fetch_type_metadata(sql_type)
-          default_value = extract_value_from_default(default_expression, default_type)
-          default_function = extract_default_function(default_expression)
-          cast_type = lookup_cast_type(sql_type)
+          type_metadata = fetch_type_metadata(field.sql_type)
+          default_value = extract_value_from_default(field.default_expression, field.default_type)
+          default_function = extract_default_function(field.default_expression)
+          cast_type = lookup_cast_type(field.sql_type)
           default_value = cast_type.cast(default_value)
 
-          args = [column_name]
+          args = [field.name]
           args << cast_type if ::ActiveRecord::version >= Gem::Version.new('8.1')
-          args += [default_value, type_metadata, field[1].include?('Nullable'), default_function]
+          args += [default_value, type_metadata, field.sql_type.include?('Nullable'), default_function]
 
-          Clickhouse::Column.new(*args, codec: field[5].presence)
+          Clickhouse::Column.new(*args, codec: field.codec.presence, default_kind: field.default_type)
         end
 
         def extract_value_from_default(default_expression, default_type)
@@ -295,7 +308,7 @@ module ActiveRecord
           (%r{\w+\(.*\)} === default)
         end
 
-        def raw_execute(sql, settings: {}, except_params: [], format: @response_format)
+        def raw_execute(sql, settings: {}, except_params: [], format: response_format)
           statement = Statement.new(sql, format: format)
           retries = 2
           begin
@@ -315,8 +328,7 @@ module ActiveRecord
           @lock.synchronize do
             @connection.post("/?#{settings_params(settings, except: except_params)}",
                              statement.formatted_sql,
-                             'Content-Type' => 'application/x-www-form-urlencoded',
-                             'User-Agent' => ClickhouseAdapter::USER_AGENT)
+                             build_request_headers(include_database: !except_params.include?(:database)))
           end
         end
 
@@ -325,13 +337,55 @@ module ActiveRecord
           log(sql, "#{name} (system)") { yield }
         end
 
+        # The response format that should be applied to the next request.
+        # Reads the per-thread override pushed by `with_response_format`, falling
+        # back to the adapter-level default when no override is in scope.
+        def response_format
+          stack = response_format_stack
+          stack.empty? ? @default_response_format : stack.last
+        end
+
+        def response_format_stack
+          key = (@response_format_stack_key ||= :"clickhouse_response_format_stack_#{object_id}")
+          Thread.current[key] ||= []
+        end
+
         def settings_params(settings = {}, except: [])
           request_params = @connection_config || {}
           block_settings = @block_settings || {}
+
+          case @http_auth
+          when HTTP_AUTH_BASIC
+            request_params = request_params.except(:user, :password)
+          when HTTP_AUTH_X_HEADERS
+            request_params = request_params.except(:user, :password, :database)
+          end
+
           request_params.merge(block_settings)
                         .merge(settings)
                         .except(*except)
                         .to_param
+        end
+
+        def build_request_headers(include_database: true)
+          request_headers = {
+            'Content-Type' => 'application/x-www-form-urlencoded',
+            'User-Agent' => ClickhouseAdapter::USER_AGENT
+          }
+
+          case @http_auth
+          when HTTP_AUTH_BASIC
+            if @config[:username] && @config[:password]
+              credentials = Base64.strict_encode64("#{@config[:username]}:#{@config[:password]}")
+              request_headers['Authorization'] = "Basic #{credentials}"
+            end
+          when HTTP_AUTH_X_HEADERS
+            request_headers['X-ClickHouse-User'] = @config[:username].to_s if @config[:username]
+            request_headers['X-ClickHouse-Key'] = @config[:password].to_s if @config[:password]
+            request_headers['X-ClickHouse-Database'] = @config[:database].to_s if include_database && @config[:database]
+          end
+
+          request_headers
         end
 
         # Returns a hash of table names to their engine types
