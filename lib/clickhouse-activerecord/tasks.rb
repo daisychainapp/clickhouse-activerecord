@@ -53,8 +53,10 @@ module ClickhouseActiverecord
       # separate materialized from regular views
       mat_views, views = views.partition { |sql| sql.match(/^CREATE\s+MATERIALIZED\s+VIEW/) }
 
-      # sort: UDFs -> materialized views -> tables -> views
-      ordered_definitions = functions.sort + mat_views.sort + tables.sort + views.sort
+      # sort: UDFs -> tables -> views -> materialized views
+      # Materialized views may target (TO) or read FROM tables and regular views,
+      # so they must be created after those exist or schema load fails (UNKNOWN_TABLE).
+      ordered_definitions = functions.sort + tables.sort + views.sort + mat_views.sort
 
       # puts to file
       File.open(path, 'w:utf-8') do |file|
