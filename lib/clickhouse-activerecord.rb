@@ -2,8 +2,11 @@
 
 require 'active_record/connection_adapters/clickhouse_adapter'
 
+require 'core_extensions/active_record/insert_all'
+require 'core_extensions/active_record/insert_all/builder'
 require 'core_extensions/active_record/internal_metadata'
 require 'core_extensions/active_record/relation'
+require 'core_extensions/active_record/schema_cache'
 require 'core_extensions/active_record/schema_migration'
 require 'core_extensions/active_record/migration/command_recorder'
 require 'core_extensions/arel/nodes/select_core'
@@ -23,9 +26,12 @@ end
 
 module ClickhouseActiverecord
   def self.load
+    ActiveRecord::InsertAll.prepend(CoreExtensions::ActiveRecord::InsertAll)
+    ActiveRecord::InsertAll::Builder.prepend(CoreExtensions::ActiveRecord::InsertAll::Builder)
     ActiveRecord::InternalMetadata.prepend(CoreExtensions::ActiveRecord::InternalMetadata)
     ActiveRecord::Migration::CommandRecorder.include(CoreExtensions::ActiveRecord::Migration::CommandRecorder)
     ActiveRecord::Relation.prepend(CoreExtensions::ActiveRecord::Relation)
+    ActiveRecord::ConnectionAdapters::SchemaCache.prepend(CoreExtensions::ActiveRecord::SchemaCache)
     ActiveRecord::SchemaMigration.prepend(CoreExtensions::ActiveRecord::SchemaMigration)
 
     Arel::Nodes::SelectCore.prepend(CoreExtensions::Arel::Nodes::SelectCore)

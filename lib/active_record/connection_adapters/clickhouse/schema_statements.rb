@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'base64'
+require 'net/http'
 require 'clickhouse-activerecord/version'
 
 module ActiveRecord
@@ -11,6 +12,20 @@ module ActiveRecord
         HTTP_AUTH_BASIC = :basic
         HTTP_AUTH_X_HEADERS = :x_clickhouse_headers
         HTTP_AUTH_TYPES = [HTTP_AUTH_QUERY_PARAMS, HTTP_AUTH_BASIC, HTTP_AUTH_X_HEADERS].freeze
+
+        # Same threshold as `primary_keys`: before it the primary key is guessed from the column
+        # named `id`, which `system.columns` cannot reproduce.
+        BULK_SCHEMA_MIN_VERSION = Gem::Version.new('23.4')
+
+        # Connection-level failures worth a single retry of a read on a fresh connection. With
+        # `retry_on_connect_error`, `with_http_session` retries Net::OpenTimeout first, so a read sees
+        # it here only when that setting is off.
+        RETRYABLE_CONNECTION_ERRORS = [Net::OpenTimeout, EOFError, Errno::ECONNRESET, IOError, OpenSSL::SSL::SSLError].freeze
+
+        # The connection fails to open, before Net::HTTP writes the request. Nothing reached the
+        # server, so with `retry_on_connect_error` every statement, a write included, retries once
+        # on these.
+        CONNECT_ERRORS = [Net::OpenTimeout, SocketError, Errno::ECONNREFUSED].freeze
 
         def with_settings(**settings)
           @block_settings ||= {}
@@ -45,11 +60,7 @@ module ActiveRecord
         end
 
         def execute(sql, name = nil, format: response_format, settings: {})
-          with_response_format(format) do
-            log(sql, [adapter_name, name].compact.join(' ')) do
-              raw_execute(sql, settings: settings)
-            end
-          end
+          execute_statement(sql, name, format: format, settings: settings)
         end
 
         def execute_batch(statements, name = nil, **kwargs)
@@ -65,9 +76,8 @@ module ActiveRecord
             log(sql, [adapter_name, 'Stream', name].compact.join(' ')) do
               statement = Statement.new(sql, format: response_format)
               result = nil
-              @lock.synchronize do
+              with_http_session do
                 req = Net::HTTP::Post.new("/?#{settings_params(settings)}", build_request_headers)
-                @connection.start unless @connection.started?
                 @connection.request(req, statement.formatted_sql) do |response|
                   result = statement.streaming_response(response)
                 end
@@ -84,26 +94,43 @@ module ActiveRecord
         end
 
         def internal_exec_query(sql, name = nil, binds = [], prepare: false, async: false, allow_retry: false)
-          result = execute(sql, name, format: response_format || ClickhouseAdapter::DEFAULT_RESPONSE_FORMAT)
-          unless result.is_a?(Hash) && result.key?('meta')
-            raise ActiveRecord::ActiveRecordError,
-              "Unexpected ClickHouse response: class=#{result.class} " \
-              "inspect=#{result.inspect.truncate(500)} " \
-              "sql=#{sql.truncate(200)} " \
-              "format=#{response_format.inspect}"
+          connection_retries = 0
+          begin
+            # `select_all` reaches here on each cache miss, so this must not clear the cache.
+            result = execute_statement(sql, name, format: response_format || ClickhouseAdapter::DEFAULT_RESPONSE_FORMAT)
+            unless result.is_a?(Hash) && result.key?('meta')
+              raise ActiveRecord::ActiveRecordError,
+                "Unexpected ClickHouse response: class=#{result.class} " \
+                "inspect=#{result.inspect.truncate(500)} " \
+                "sql=#{sql.truncate(200)} " \
+                "format=#{response_format.inspect}"
+            end
+            columns = result['meta'].map { |m| m['name'] }
+            types = {}
+            result['meta'].each_with_index do |m, i|
+              # need use column name and index after commit in 7.2:
+              # https://github.com/rails/rails/commit/24dbf7637b1d5cd6eb3d7100b8d0f6872c3fee3c
+              types[m['name']] = types[i] = type_map.lookup(m['type'])
+            end
+            ActiveRecord::Result.new(columns, result['data'], types)
+          rescue ActiveRecord::ActiveRecordError => e
+            raise e
+          rescue Net::ReadTimeout => e
+            raise ActiveRecord::AdapterTimeout, "Response: #{e.message}"
+          rescue *RETRYABLE_CONNECTION_ERRORS => e
+            raise ActiveRecord::ConnectionFailed, "Response: #{e.message}" if connection_retries.positive?
+
+            connection_retries += 1
+            logger&.warn("[clickhouse-activerecord] retrying read query after connection failure (#{e.class}: #{e.message})")
+            begin
+              reconnect
+            rescue StandardError
+              nil
+            end
+            retry
+          rescue StandardError => e
+            raise ActiveRecord::ActiveRecordError, "Response: #{e.message}"
           end
-          columns = result['meta'].map { |m| m['name'] }
-          types = {}
-          result['meta'].each_with_index do |m, i|
-            # need use column name and index after commit in 7.2:
-            # https://github.com/rails/rails/commit/24dbf7637b1d5cd6eb3d7100b8d0f6872c3fee3c
-            types[m['name']] = types[i] = type_map.lookup(m['type'])
-          end
-          ActiveRecord::Result.new(columns, result['data'], types)
-        rescue ActiveRecord::ActiveRecordError => e
-          raise e
-        rescue StandardError => e
-          raise ActiveRecord::ActiveRecordError, "Response: #{e.message}"
         end
 
         def exec_insert_all(sql, name)
@@ -156,10 +183,22 @@ module ActiveRecord
         end
 
         def show_create_function(function)
-          result = do_system_execute("SELECT create_query FROM system.functions WHERE origin = 'SQLUserDefined' AND name = '#{function}'")
+          result = do_system_execute("SELECT create_query FROM system.functions WHERE origin = 'SQLUserDefined' AND name = #{quote(function)}")
           return if result.nil?
 
-          result['data'].flatten.first.sub(/\ACREATE FUNCTION/, 'CREATE OR REPLACE FUNCTION')
+          result['data'].flatten.first&.sub(/\ACREATE FUNCTION/, 'CREATE OR REPLACE FUNCTION')
+        end
+
+        # The body that `create_function` takes. Raises on a definition in any other shape, because a
+        # whole statement passed back as the body fails only when it runs.
+        def function_body(function)
+          sql = show_create_function(function)
+          return if sql.nil?
+
+          match = sql.match(/\ACREATE OR REPLACE FUNCTION `?#{Regexp.escape(function)}`? AS (.*)\z/m)
+          raise ActiveRecord::ActiveRecordError, "Unexpected definition for function #{function}: #{sql}" unless match
+
+          match[1].strip
         end
 
         def table_options(table)
@@ -242,9 +281,26 @@ module ActiveRecord
           end
         end
 
+        # Read the columns and primary keys of every table in one request for the duration of
+        # the block. Lookups for a table inside the block are answered from that result; a table
+        # the result does not contain still falls back to its own request.
+        # Servers older than BULK_SCHEMA_MIN_VERSION keep the request per table.
+        def with_bulk_schema_load
+          return yield if @bulk_schema || Gem::Version.new(server_version) < BULK_SCHEMA_MIN_VERSION
+
+          begin
+            @bulk_schema = load_bulk_schema
+            yield
+          ensure
+            @bulk_schema = nil
+          end
+        end
+
         protected
 
         def table_structure(table_name)
+          return @bulk_schema[:structures][table_name] if @bulk_schema&.dig(:structures, table_name)
+
           result = do_system_execute("DESCRIBE TABLE `#{table_name}`", table_name)
           data = result['data']
 
@@ -267,6 +323,35 @@ module ActiveRecord
         end
 
         private
+
+        # One query for all tables. It gives what `DESCRIBE TABLE` gives for the columns (same
+        # order, ephemeral columns included) and what `SHOW COLUMNS` gives for the primary keys
+        # (alphabetical). Same table filter as `tables`.
+        def load_bulk_schema
+          result = do_system_execute(<<~SQL.squish, 'SCHEMA')
+            SELECT table, name, type, default_kind, default_expression, comment, compression_codec, is_in_primary_key
+            FROM system.columns
+            WHERE database = currentDatabase() AND table NOT LIKE '.inner_id.%'
+            ORDER BY table, position
+          SQL
+
+          schema = { structures: {}, primary_keys: {} }
+          result['data'].each do |table, name, type, default_kind, default_expression, comment, codec, in_primary_key|
+            (schema[:structures][table] ||= []) << Clickhouse::DescribedColumn.new(
+              name: name,
+              sql_type: type,
+              default_type: default_kind,
+              default_expression: default_expression,
+              comment: comment,
+              # `system.columns` wraps the codec as `CODEC(...)`, `DESCRIBE TABLE` does not
+              codec: codec.sub(/\ACODEC\((.*)\)\z/m, '\1'),
+            )
+            keys = (schema[:primary_keys][table] ||= [])
+            keys << name if in_primary_key.to_i == 1
+          end
+          schema[:primary_keys].each_value(&:sort!)
+          schema
+        end
 
         def schema_creation
           Clickhouse::SchemaCreation.new(self)
@@ -292,6 +377,7 @@ module ActiveRecord
 
         def extract_value_from_default(default_expression, default_type)
           return nil if default_type != 'DEFAULT' || default_expression.blank?
+          return nil if default_expression == 'NULL'
           return nil if has_default_function?(default_expression)
 
           # Convert string
@@ -308,14 +394,19 @@ module ActiveRecord
           (%r{\w+\(.*\)} === default)
         end
 
+        # `execute` without the cache-clearing wrapper ClickhouseAdapter puts on it. Not named
+        # `internal_execute`: Rails calls that with positional binds and `allow_retry:`.
+        def execute_statement(sql, name = nil, format: response_format, settings: {})
+          with_response_format(format) do
+            log(sql, [adapter_name, name].compact.join(' ')) do
+              raw_execute(sql, settings: settings)
+            end
+          end
+        end
+
         def raw_execute(sql, settings: {}, except_params: [], format: response_format)
           statement = Statement.new(sql, format: format)
-          retries = 2
-          begin
-            response = request(statement, settings: settings, except_params: except_params)
-          rescue EOFError, Errno::ECONNRESET, OpenSSL::SSL::SSLError
-            retry if (retries -= 1) > 0 # rubocop:disable Style/NumericPredicate
-          end
+          response = request(statement, settings: settings, except_params: except_params)
           statement.processed_response(response)
         end
 
@@ -325,10 +416,37 @@ module ActiveRecord
         # @param [Array] except_params
         # @return [Net::HTTPResponse]
         def request(statement, settings: {}, except_params: [])
-          @lock.synchronize do
+          with_http_session do
             @connection.post("/?#{settings_params(settings, except: except_params)}",
                              statement.formatted_sql,
                              build_request_headers(include_database: !except_params.include?(:database)))
+          end
+        end
+
+        # The connection can fail to open in `start` or, when Net::HTTP reopens a stale keep-alive
+        # socket, inside the yielded request. Both happen before Net::HTTP writes the request, so with
+        # `retry_on_connect_error` the whole block runs again on a new session.
+        #
+        # Any other Exception, an interrupt included, also finishes the session: the reply left unread
+        # on the keep-alive socket would otherwise answer the next request.
+        def with_http_session
+          connect_retries = 0
+          @lock.synchronize do
+            begin
+              @connection.start unless @connection.started?
+              yield
+            rescue *CONNECT_ERRORS => e
+              @connection.finish if @connection.started?
+              raise unless @retry_on_connect_error
+              raise ActiveRecord::ConnectionNotEstablished, "Response: #{e.message}" if connect_retries.positive?
+
+              connect_retries += 1
+              logger&.warn("[clickhouse-activerecord] retrying statement after the connection failed to open (#{e.class}: #{e.message})")
+              retry
+            rescue Exception
+              @connection.finish if @connection.started?
+              raise
+            end
           end
         end
 
