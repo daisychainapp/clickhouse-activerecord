@@ -23,6 +23,13 @@ RSpec.configure do |config|
     c.syntax = :expect
   end
 
+  # The adapter sends inserts async without waiting (ClickhouseActiverecord::Settings), so a read
+  # right after an insert can miss it. Wait for each insert in specs.
+  config.before do
+    ClickhouseActiverecord::Settings.async_insert = 0
+    ClickhouseActiverecord::Settings.wait_for_async_insert = 1
+  end
+
   config.around(:each, :migrations) do |example|
     clear_consts
     clear_db
