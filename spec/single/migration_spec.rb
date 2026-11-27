@@ -116,6 +116,31 @@ RSpec.describe 'Migration', :migrations do
             end
           end
 
+          context 'float' do
+            let(:directory) { 'dsl_table_with_float_creation' }
+            it 'resolves the width by limit and keeps it in the schema dump' do
+              subject
+
+              current_schema = schema(model)
+
+              expect(current_schema['default_float'].sql_type).to eq('Nullable(Float32)')
+              expect(current_schema['float32'].sql_type).to eq('Float32')
+              expect(current_schema['float64'].sql_type).to eq('Float64')
+              expect(current_schema['nullable_float64'].sql_type).to eq('Nullable(Float64)')
+
+              require 'clickhouse-activerecord/schema_dumper'
+
+              dumped = StringIO.new
+              ClickhouseActiverecord::SchemaDumper.dump(ActiveRecord::Base.connection, dumped)
+
+              expect(dumped.string).to include('t.float "default_float"')
+              expect(dumped.string).not_to include('t.float "default_float", limit')
+              expect(dumped.string).to include('t.float "float32", default: 0.0, null: false')
+              expect(dumped.string).to include('t.float "float64", limit: 8, default: 0.0, null: false')
+              expect(dumped.string).to include('t.float "nullable_float64", limit: 8')
+            end
+          end
+
           context 'decimal' do
             let(:directory) { 'dsl_table_with_decimal_creation' }
             it 'creates a table with valid scale and precision' do
@@ -397,6 +422,18 @@ RSpec.describe 'Migration', :migrations do
       end
     end
 
+    describe 'add float column' do
+      let(:directory) { 'dsl_add_float64_column' }
+      it 'resolves the width by limit' do
+        subject
+
+        current_schema = schema(model)
+
+        expect(current_schema['float32'].sql_type).to eq('Float32')
+        expect(current_schema['float64'].sql_type).to eq('Float64')
+      end
+    end
+
     describe 'drop column' do
       let(:directory) { 'dsl_drop_column' }
       it 'drops column' do
@@ -407,6 +444,21 @@ RSpec.describe 'Migration', :migrations do
         expect(current_schema.keys.count).to eq(1)
         expect(current_schema).to have_key('date')
         expect(current_schema['date'].sql_type).to eq('Date')
+      end
+    end
+
+    context 'with distributed_service_tables as the string "false"' do
+      it 'creates schema_migrations without a Distributed table' do
+        ActiveRecord::Base.establish_connection(connection_config.merge(distributed_service_tables: 'false'))
+        connection = ActiveRecord::Base.connection
+        connection.drop_table('schema_migrations', if_exists: true)
+        allow(connection).to receive(:create_table).and_call_original
+
+        connection.schema_migration.create_table
+
+        expect(connection).to have_received(:create_table).with('schema_migrations', hash_excluding(:with_distributed))
+      ensure
+        ActiveRecord::Base.establish_connection(connection_config)
       end
     end
 
@@ -433,6 +485,46 @@ RSpec.describe 'Migration', :migrations do
 
           expect(ActiveRecord::Base.connection.functions).to match_array(['forced_fun', 'some_fun'])
           expect(ActiveRecord::Base.connection.show_create_function('forced_fun').chomp).to eq('CREATE OR REPLACE FUNCTION forced_fun AS (x, y) -> (x + y)')
+        end
+      end
+
+      context 'schema dump' do
+        before { require 'clickhouse-activerecord/schema_dumper' }
+
+        def dump
+          ClickhouseActiverecord::SchemaDumper.dump(ActiveRecord::Base.connection, StringIO.new).string
+        end
+
+        it 'loads a function back unchanged, with a quote, a backslash and #{ in its body' do
+          ActiveRecord::Base.connection.execute(<<~'SQL')
+            CREATE FUNCTION quoted_fun AS (s) -> concat('"', replaceRegexpAll(s, '\\d', '#{x}'))
+          SQL
+          original = ActiveRecord::Base.connection.show_create_function('quoted_fun')
+          schema = dump
+          ActiveRecord::Base.connection.drop_functions
+
+          Tempfile.create(['schema', '.rb']) do |file|
+            file.write(schema)
+            file.flush
+            quietly { load file.path }
+          end
+
+          expect(ActiveRecord::Base.connection.show_create_function('quoted_fun')).to eq(original)
+        end
+
+      end
+
+      context '#function_body' do
+        it 'returns nil for a function that does not exist, whatever its name' do
+          expect(ActiveRecord::Base.connection.function_body("no_such'fun")).to be_nil
+        end
+
+        it 'raises on a function definition in an unexpected shape' do
+          allow(ActiveRecord::Base.connection).to receive(:show_create_function).with('odd_fun')
+                                                                               .and_return('CREATE FUNCTION odd_fun AS (x) -> x')
+
+          expect { ActiveRecord::Base.connection.function_body('odd_fun') }
+            .to raise_error(ActiveRecord::ActiveRecordError, /odd_fun/)
         end
       end
     end

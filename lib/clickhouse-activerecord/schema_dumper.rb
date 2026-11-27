@@ -130,13 +130,13 @@ module ClickhouseActiverecord
     end
 
     def function(function, stream)
+      body = @connection.function_body(function)
+      return if body.nil?
+
       stream.puts "  # FUNCTION: #{function}"
-      sql = @connection.show_create_function(function)
-      if sql
-        stream.puts "  # SQL: #{sql}"
-        stream.puts "  create_function \"#{function}\", \"#{sql.sub(/\ACREATE(OR REPLACE)? FUNCTION .*? AS/, '').strip}\", force: true"
-        stream.puts
-      end
+      stream.puts "  # SQL: #{@connection.show_create_function(function)}"
+      stream.puts "  create_function #{function.inspect}, #{body.inspect}, force: true"
+      stream.puts
     end
 
     def format_options(options)
@@ -154,22 +154,17 @@ module ClickhouseActiverecord
       end
     end
 
-    def schema_limit(column)
-      return nil if column.type == :float
-      super
-    end
-
     def schema_unsigned(column)
       return nil unless column.type == :integer && !simple
       (column.sql_type =~ /(Nullable)?\(?UInt\d+\)?/).nil? ? false : nil
     end
 
     def schema_array(column)
-      (column.sql_type =~ /Array\(/).nil? ? nil : true
+      column.array ? true : nil
     end
 
     def schema_map(column)
-      if column.sql_type =~ /Map\(([^,]+),\s*(Array)\)/
+      if column.sql_type =~ /Map\([^,]+,\s*Array\(/
         return :array
       end
 
